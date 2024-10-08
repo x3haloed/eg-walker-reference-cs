@@ -700,7 +700,7 @@ namespace EgWalkerReference
 
         public static List<int> FindConflicting(CausalGraph cg, List<int> a, List<int> b, Action<LVRange, DiffFlag> visit)
         {
-            var queue = new SortedSet<(List<int> V, DiffFlag Flag)>(Comparer<(List<int>, DiffFlag)>.Create((x, y) =>
+            var queue = new SortedSet<(List<int> V, DiffFlag Flag)>(Comparer<(List<int> V, DiffFlag Flag)>.Create((x, y) =>
             {
                 for (int i = 0; i < x.V.Count; i++)
                 {
@@ -711,10 +711,11 @@ namespace EgWalkerReference
                 if (x.V.Count < y.V.Count) return -1;
                 if (x.V.Count > y.V.Count) return 1;
                 return x.Flag.CompareTo(y.Flag);
-            }));
-
-            queue.Add((a.OrderByDescending(v => v).ToList(), DiffFlag.A));
-            queue.Add((b.OrderByDescending(v => v).ToList(), DiffFlag.B));
+            }))
+            {
+                (a.OrderByDescending(v => v).ToList(), DiffFlag.A),
+                (b.OrderByDescending(v => v).ToList(), DiffFlag.B)
+            };
 
             while (true)
             {
