@@ -8,14 +8,19 @@ Conceptually, rather than storing a list of transformed operations (OT), or stor
 
 In practice, this means operations look like this:
 
-```typescript
-interface ListOperation<T> {
-  parentVersions: VersionId[],
-  id: VersionId, // Globally unique.
+```csharp
+public class ListOp<T>
+{
+    public string Type { get; set; } // Either "ins" or "del"
+    public int Pos { get; set; }
+    public T Content { get; set; } // Nullable for delete operations
 
-  type: 'insert' | 'delete',
-  position: number,
-  insertedContent?: T, // Only needed for inserts
+    public ListOp(string type, int pos, T content = default(T))
+    {
+        Type = type;
+        Pos = pos;
+        Content = content;
+    }
 }
 ```
 
@@ -29,44 +34,54 @@ This algorithm was first created in the [diamond types](https://github.com/josep
 
 ## Usage example
 
-```javascript
-import * as egw from 'eg-walker-reference'
+```csharp
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using EgWalkerReference;
 
-const oplog1 = egw.createOpLog()
+class Program
+{
+    static void Main(string[] args)
+    {
+        // Create a new ListOpLog for first oplog
+        var oplog1 = ListOperations.CreateOpLog<string>();
 
-// Insert 'h', 'i' from user1.
-egw.localInsert(oplog1, 'user1', 0, 'h', 'i')
-console.log(egw.checkoutSimpleString(oplog1)) // 'hi'
+        // Insert 'h', 'i' from user1
+        ListOperations.LocalInsert(oplog1, "user1", 0, "h", "i");
+        Console.WriteLine(ListOperations.CheckoutSimpleString(oplog1)); // Should print 'hi'
 
-// Users 1 and 2 concurrently insert A and B at the start of the document
-const oplog2 = egw.createOpLog() // In a new document
+        // Users 1 and 2 concurrently insert 'A' and 'B' at the start of a new document
+        var oplog2 = ListOperations.CreateOpLog<string>();
 
-const v = egw.getLatestVersion(oplog2) // [] in this case.
-egw.pushOp(oplog2, ['user1', 0], v, 'ins', 0, 'A')
-egw.pushOp(oplog2, ['user2', 0], v, 'ins', 0, 'B')
+        var v = ListOperations.GetLatestVersion(oplog2); // Empty version in this case
+        ListOperations.PushOp(oplog2, new RawVersion("user1", 0), v, "ins", 0, "A");
+        ListOperations.PushOp(oplog2, new RawVersion("user2", 0), v, "ins", 0, "B");
 
-// Prints 'AB' - since fugue tie breaks by ordering by agent ID.
-console.log(egw.checkoutSimpleString(oplog2))
+        // Prints 'AB' since the tie breaks by ordering by agent ID
+        Console.WriteLine(ListOperations.CheckoutSimpleString(oplog2)); // Should print 'AB'
 
-// Now lets simulate the same thing using 2 oplogs.
-const oplogA = egw.createOpLog()
-egw.localInsert(oplogA, 'user1', 0, 'A')
+        // Now, let's simulate the same thing using 2 oplogs
+        var oplogA = ListOperations.CreateOpLog<string>();
+        ListOperations.LocalInsert(oplogA, "user1", 0, "A");
 
-const oplogB = egw.createOpLog()
-egw.localInsert(oplogB, 'user2', 0, 'B')
+        var oplogB = ListOperations.CreateOpLog<string>();
+        ListOperations.LocalInsert(oplogB, "user2", 0, "B");
 
-// The two users sync changes:
-egw.mergeOplogInto(oplogA, oplogB)
-egw.mergeOplogInto(oplogB, oplogA)
+        // The two users sync changes:
+        ListOperations.MergeOplogInto(oplogA, oplogB);
+        ListOperations.MergeOplogInto(oplogB, oplogA);
 
-// And now they both see AB.
-console.log(egw.checkoutSimpleString(oplogA)) // Also AB.
-console.log(egw.checkoutSimpleString(oplogB)) // Also AB.
+        // And now they both see 'AB'
+        Console.WriteLine(ListOperations.CheckoutSimpleString(oplogA)); // Should print 'AB'
+        Console.WriteLine(ListOperations.CheckoutSimpleString(oplogB)); // Should print 'AB'
 
-// Finally lets make a branch and update it.
-const branch = egw.createEmptyBranch()
-egw.mergeChangesIntoBranch(branch, oplogA)
-console.log(branch.snapshot) // ['A', 'B'].
+        // Finally, let's make a branch and update it
+        var branch = new Branch<string> { Snapshot = new List<string>() };
+        ListOperations.MergeChangesIntoBranch(branch, oplogA);
+        Console.WriteLine(string.Join(",", branch.Snapshot)); // Should print 'A,B'
+    }
+}
 ```
 
 
