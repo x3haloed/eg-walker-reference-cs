@@ -936,14 +936,14 @@ namespace EgWalkerReference
             }
         }
 
-        private static int FindItemIdx<T>(EditContext<T> ctx, int needle)
+        public static int FindItemIdx<T>(EditContext<T> ctx, int needle)
         {
             int idx = ctx.Items.FindIndex(i => i.OpId == needle);
             if (idx == -1) throw new InvalidOperationException("Could not find needle in items");
             return idx;
         }
 
-        private static int ItemWidth(ItemState state)
+        public static int ItemWidth(ItemState state)
         {
             return state == ItemState.Inserted ? 1 : 0;
         }
