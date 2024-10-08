@@ -947,5 +947,27 @@ namespace EgWalkerReference
         {
             return state == ItemState.Inserted ? 1 : 0;
         }
+
+        public static VersionSummary SummarizeVersion(CausalGraph cg)
+        {
+            var summary = new VersionSummary();
+
+            foreach (var kvp in cg.AgentToVersion)
+            {
+                string agent = kvp.Key;
+                var clientEntries = kvp.Value;
+                var ranges = new List<LVRange>();
+
+                foreach (var ce in clientEntries)
+                {
+                    // Each ClientEntry represents a range of sequences for the agent
+                    ranges.Add(new LVRange(ce.Seq, ce.SeqEnd));
+                }
+
+                summary[agent] = ranges;
+            }
+
+            return summary;
+        }
     }
 }
