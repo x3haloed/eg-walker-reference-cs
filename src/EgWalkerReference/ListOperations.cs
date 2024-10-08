@@ -56,6 +56,12 @@ namespace EgWalkerReference
             var (commonVersion, _) = Utils.IntersectWithSummary(src.Cg, vs);
             var ranges = Utils.Diff(src.Cg, commonVersion, src.Cg.Heads).BOnly;
 
+            if (ranges.Count == 0)
+            {
+                // No new versions to merge
+                return;
+            }
+
             var cgDiff = Utils.SerializeDiff(src.Cg, ranges);
             Utils.MergePartialVersions(dest.Cg, cgDiff);
 
@@ -231,8 +237,10 @@ namespace EgWalkerReference
 
         private static void Integrate<T>(EditContext<T> ctx, CausalGraph cg, Item newItem, ref DocCursor cursor)
         {
+            // If there's no concurrency, we don't need to scan.
             if (cursor.Idx >= ctx.Items.Count || ctx.Items[cursor.Idx].CurState != ItemState.NotYetInserted) return;
 
+            // Sometimes we need to scan ahead and maybe insert there, or maybe insert here.
             bool scanning = false;
             int scanIdx = cursor.Idx;
             int scanEndPos = cursor.EndPos;
@@ -244,33 +252,22 @@ namespace EgWalkerReference
             {
                 var other = ctx.Items[scanIdx];
 
+                // When concurrent inserts happen, the newly inserted item goes somewhere between the
+                // insert position itself (passed in through cursor) to the next item that existed
+                // when which the insert occurred. We can use the item's state to bound the search.
                 if (other.CurState != ItemState.NotYetInserted) break;
                 if (other.OpId == newItem.RightParent) throw new InvalidOperationException("Invalid state");
 
+                // The index of the origin left / right for the other item.
                 int oleftIdx = other.OriginLeft == -1 ? -1 : Utils.FindItemIdx(ctx, other.OriginLeft);
                 if (oleftIdx < leftIdx) break;
                 else if (oleftIdx == leftIdx)
                 {
                     int orightIdx = other.RightParent == -1 ? ctx.Items.Count : Utils.FindItemIdx(ctx, other.RightParent);
 
-                    if (orightIdx == rightIdx)
+                    if (orightIdx == rightIdx && Utils.LvCmp(cg, newItem.OpId, other.OpId) < 0)
                     {
-                        int cmp = Utils.CompareVersions(cg, newItem.OpId, other.OpId);
-                        if (cmp < 0)
-                        {
-                            // newItem should come before other
-                            break;
-                        }
-                        else if (cmp > 0)
-                        {
-                            // Continue scanning
-                            scanning = orightIdx < rightIdx;
-                        }
-                        else
-                        {
-                            // Tie-breaker resulted in equality, which shouldn't happen
-                            throw new InvalidOperationException("Tie-breaker did not resolve ordering");
-                        }
+                        break;
                     }
                     else scanning = orightIdx < rightIdx;
                 }
@@ -284,6 +281,8 @@ namespace EgWalkerReference
                     cursor.EndPos = scanEndPos;
                 }
             }
+
+            // We've found the position. Insert where the cursor points.
         }
 
         private static DocCursor FindByCurPos<T>(EditContext<T> ctx, int targetPos)

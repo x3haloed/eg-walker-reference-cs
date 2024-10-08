@@ -122,7 +122,8 @@ namespace EgWalkerReference
 
         public static int NextLV(CausalGraph cg)
         {
-            return LastOr(cg.Entries, e => e.VEnd, 0);
+            if (cg.Entries.Count == 0) return 0;
+            return cg.Entries.Max(e => e.VEnd);
         }
 
         public static int NextSeqForAgent(CausalGraph cg, string agent)
@@ -232,54 +233,70 @@ namespace EgWalkerReference
             return FindClientEntryRaw(cg, agent, seq) != null;
         }
 
-        public static CGEntry AddRaw(CausalGraph cg, RawVersion id, int len = 1, List<RawVersion> rawParents = null)
+        public static CGEntry AddRaw(CausalGraph cg, RawVersion id, int len = 1, List<RawVersion> rawParents = null, int? version = null)
         {
             List<int> parents = rawParents != null
                 ? RawToLVList(cg, rawParents)
                 : new List<int>(cg.Heads);
 
-            return Add(cg, id.Agent, id.Seq, id.Seq + len, parents);
+            return Add(cg, id.Agent, id.Seq, id.Seq + len, parents, version);
         }
 
-        public static CGEntry Add(CausalGraph cg, string agent, int seqStart, int seqEnd, List<int> parents)
+
+        public static CGEntry Add(CausalGraph cg, string agent, int seqStart, int seqEnd, List<int> parents, int? version = null)
         {
-            int version = NextLV(cg);
-
-            while (true)
+            if (!version.HasValue)
             {
-                var existingEntry = FindClientEntryTrimmed(cg, agent, seqStart);
-                if (existingEntry == null) break; // Insert start..end.
+                version = NextLV(cg);
 
-                if (existingEntry.SeqEnd >= seqEnd) return null; // The entire span was already inserted.
+                while (true)
+                {
+                    var existingEntry = FindClientEntryTrimmed(cg, agent, seqStart);
+                    if (existingEntry == null) break; // Insert start..end.
 
-                // Or trim and loop.
-                seqStart = existingEntry.SeqEnd;
-                parents = new List<int> { existingEntry.Version + (existingEntry.SeqEnd - existingEntry.Seq) - 1 };
+                    if (existingEntry.SeqEnd >= seqEnd) return null; // The entire span was already inserted.
+
+                    // Or trim and loop.
+                    seqStart = existingEntry.SeqEnd;
+                    parents = new List<int> { existingEntry.Version + (existingEntry.SeqEnd - existingEntry.Seq) - 1 };
+                }
+            }
+            else
+            {
+                // Ensure the version doesn't conflict with existing entries
+                if (cg.Entries.Any(e => (version.Value >= e.Version && version.Value < e.VEnd)))
+                {
+                    throw new InvalidOperationException($"Version {version.Value} already exists in the causal graph.");
+                }
             }
 
             int len = seqEnd - seqStart;
-            int vEnd = version + len;
+            int vEnd = version.Value + len;
             var entry = new CGEntry
             {
-                Version = version,
+                Version = version.Value,
                 VEnd = vEnd,
                 Agent = agent,
                 Seq = seqStart,
                 Parents = new List<int>(parents)
             };
 
-            // The entry list will remain ordered here in standard version order.
-            PushRLEList(cg.Entries, entry, TryAppendEntries);
-            // But the agent entries may end up out of order, since we might get [b,0] before [b,1] if
-            // the same agent modifies two different branches. Hence, insertRLEList instead of pushRLEList.
-            InsertRLEList(
-                ClientEntriesForAgent(cg, agent),
-                new ClientEntry { Seq = seqStart, SeqEnd = seqEnd, Version = version },
-                e => e.Seq,
-                TryAppendClientEntry
-            );
+            // Insert the entry into the causal graph
+            InsertCGEntry(cg, entry);
 
+            // Insert into AgentToVersion mapping
+            var clientEntry = new ClientEntry
+            {
+                Seq = seqStart,
+                SeqEnd = seqEnd,
+                Version = version.Value
+            };
+            var agentEntries = ClientEntriesForAgent(cg, agent);
+            InsertClientEntry(agentEntries, clientEntry);
+
+            // Update heads
             cg.Heads = AdvanceFrontier(cg.Heads, vEnd - 1, parents);
+
             return entry;
         }
 
@@ -288,9 +305,9 @@ namespace EgWalkerReference
             int idx = BinarySearch(cg.Entries, (entry) =>
             {
                 if (v < entry.Version)
-                    return 1;
-                else if (v >= entry.VEnd)
                     return -1;
+                else if (v >= entry.VEnd)
+                    return 1;
                 else
                     return 0;
             });
@@ -304,6 +321,11 @@ namespace EgWalkerReference
             var e = FindEntryContainingRaw(cg, v);
             int offset = v - e.Version;
             return Tuple.Create(e, offset);
+        }
+
+        public static int LvCmp(CausalGraph cg, int a, int b)
+        {
+            return LvToRaw(cg, a).CompareTo(LvToRaw(cg, b));
         }
 
         public static Tuple<string, int, List<int>> LvToRawWithParents(CausalGraph cg, int v)
@@ -798,29 +820,34 @@ namespace EgWalkerReference
             }
         }
 
+        /// <summary>
+        /// Two versions have one of 4 different relationship configurations:
+        /// - They're equal (a == b)
+        /// - They're concurrent (a || b)
+        /// - Or one dominates the other (a < b or b > a).
+        /// 
+        /// This method depends on the caller to check if the passed versions are equal
+        /// (a == b). Otherwise it returns 0 if the operations are concurrent,
+        /// -1 if a < b or 1 if b > a.
+        /// </summary>
+        /// <exception cref="InvalidOperationException"></exception>
         public static int CompareVersions(CausalGraph cg, int a, int b)
         {
-            if (a == b) return 0;
-            else if (VersionContainsLV(cg, new List<int> { a }, b)) return 1; // a causally follows b
-            else if (VersionContainsLV(cg, new List<int> { b }, a)) return -1; // b causally follows a
-            else
+            if (a > b)
             {
-                // Concurrent versions; use a deterministic tie-breaker
-                var rvA = LvToRaw(cg, a);
-                var rvB = LvToRaw(cg, b);
-
-                // Tie-breaker: compare agent IDs
-                int agentComparison = string.Compare(rvA.Agent, rvB.Agent, StringComparison.Ordinal);
-                if (agentComparison != 0)
-                    return agentComparison;
-                else
-                    return rvA.Seq.CompareTo(rvB.Seq);
+                return VersionContainsLV(cg, new List<int> { a }, b) ? -1 : 0;
             }
+            else if (a < b)
+            {
+                return VersionContainsLV(cg, new List<int> { b }, a) ? 1 : 0;
+            }
+            
+            throw new InvalidOperationException("a and b are equal");
         }
-
 
         public class PartialSerializedCGEntry
         {
+            public int Version;
             public string Agent;
             public int Seq;
             public int Len;
@@ -850,6 +877,7 @@ namespace EgWalkerReference
 
                     entries.Add(new PartialSerializedCGEntry
                     {
+                        Version = e.Version + offset,
                         Agent = e.Agent,
                         Seq = e.Seq + offset,
                         Len = len,
@@ -870,13 +898,68 @@ namespace EgWalkerReference
 
         public static LVRange MergePartialVersions(CausalGraph cg, PartialSerializedCG data)
         {
-            int start = NextLV(cg);
+            if (data == null || data.Count == 0)
+            {
+                // No data to merge; return an empty LVRange or handle as needed
+                return new LVRange(0, 0);
+            }
+
+            int? start = null;
+            int? end = null;
 
             foreach (var entry in data)
             {
-                AddRaw(cg, new RawVersion(entry.Agent, entry.Seq), entry.Len, entry.Parents);
+                // Convert parents from RawVersion to local versions
+                List<int> parents = RawToLVList(cg, entry.Parents);
+
+                int version = entry.Version;
+                int vEnd = version + entry.Len;
+
+                // Update start and end
+                if (start == null || entry.Version < start) start = entry.Version;
+                if (end == null || (entry.Version + entry.Len) > end) end = entry.Version + entry.Len;
+
+                // Create the CGEntry directly
+                var cgEntry = new CGEntry
+                {
+                    Version = version,
+                    VEnd = vEnd,
+                    Agent = entry.Agent,
+                    Seq = entry.Seq,
+                    Parents = parents
+                };
+
+                // Insert the entry into the causal graph
+                InsertCGEntry(cg, cgEntry);
+
+                // Update AgentToVersion
+                var clientEntry = new ClientEntry
+                {
+                    Seq = entry.Seq,
+                    SeqEnd = entry.Seq + entry.Len,
+                    Version = version
+                };
+
+                var agentEntries = ClientEntriesForAgent(cg, entry.Agent);
+                InsertClientEntry(agentEntries, clientEntry);
             }
-            return new LVRange(start, NextLV(cg));
+
+            // Return the range of versions that were merged
+            return new LVRange(start.Value, end.Value);
+        }
+
+        private static void InsertCGEntry(CausalGraph cg, CGEntry newEntry)
+        {
+            int idx = cg.Entries.BinarySearch(newEntry, Comparer<CGEntry>.Create((a, b) => a.Version.CompareTo(b.Version)));
+            if (idx < 0) idx = ~idx;
+            cg.Entries.Insert(idx, newEntry);
+        }
+
+        private static void InsertClientEntry(List<ClientEntry> entries, ClientEntry newEntry)
+        {
+            int idx = entries.BinarySearch(newEntry, Comparer<ClientEntry>.Create((a, b) => a.Seq.CompareTo(b.Seq)));
+            if (idx < 0) idx = ~idx;
+            entries.Insert(idx, newEntry);
         }
 
         public static IEnumerable<CGEntry> MergePartialVersions2(CausalGraph cg, PartialSerializedCG data)
